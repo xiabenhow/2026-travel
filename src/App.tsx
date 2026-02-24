@@ -1,9 +1,11 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { MapPin, Clock3, Plane, Hotel, Car, Link as LinkIcon, ClipboardCopy, CheckCircle2, Sparkles } from "lucide-react";
+import { MapPin, Clock3, Plane, Hotel, Car, Link as LinkIcon, ClipboardCopy, CheckCircle2, Sparkles, Calculator, Coins, Wallet2, Users, Plus, Trash2 } from "lucide-react";
+
+const DEFAULT_TWD_PER_THB = 1.012; // 可手動調整（依當下匯率）
 
 const itinerary = [
   {
@@ -164,7 +166,7 @@ const itinerary = [
         title: "高空酒吧（選配）/ 喬德夜市 / 自由安排",
         location: "Tichuca 或飯店附近",
         transport: "計程車",
-        note: "回市中心自由活動時間。",
+        note: "回市中心活動時間。",
         icon: "clock",
       },
     ],
@@ -295,6 +297,30 @@ function iconFor(type: string) {
   }
 }
 
+function getTypeStyle(type: string) {
+  const styles: Record<string, any> = {
+    plane: { badge: "bg-violet-100 text-violet-800 border-violet-200", label: "航班" },
+    hotel: { badge: "bg-amber-100 text-amber-800 border-amber-200", label: "住宿" },
+    car: { badge: "bg-emerald-100 text-emerald-800 border-emerald-200", label: "交通" },
+    map: { badge: "bg-sky-100 text-sky-800 border-sky-200", label: "景點/餐廳" },
+    clock: { badge: "bg-slate-100 text-slate-800 border-slate-200", label: "行程" },
+  };
+  return styles[type] || styles.clock;
+}
+
+function estimateCostTHB(event: any) {
+  const text = `${event.title || ""} ${event.note || ""} ${event.transport || ""}`;
+  if (/高爾夫球車/.test(text)) return 350;
+  if (/包車/.test(text)) return 1200;
+  if (/計程車/.test(text)) return 180;
+  if (/夜市/.test(text)) return 300;
+  if (/晚餐/.test(text)) return 600;
+  if (/咖啡|早午餐/.test(text)) return 350;
+  if (/市集/.test(text)) return 800;
+  if (/Spa|舒壓/.test(text)) return 800;
+  return 0;
+}
+
 function buildMapUrl(addressOrPlace: string) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addressOrPlace)}`;
 }
@@ -350,8 +376,211 @@ function getDayPalette(dayId: string) {
   return palettes[dayId] || palettes.day1;
 }
 
-function EventCard({ event, palette }: { event: any; palette: any }) {
+const LEDGER_STORAGE_KEY = "bangkok-trip-ledger-v1";
+
+function TravelLedger({ rate, palette }: { rate: number; palette: any }) {
+  const [members, setMembers] = useState(["我"]);
+  const [newMember, setNewMember] = useState("");
+  const [entries, setEntries] = useState<any[]>([]);
+  const [form, setForm] = useState({
+    date: "3/4",
+    member: "我",
+    category: "餐飲",
+    note: "",
+    amountTHB: 0,
+    paidBy: "我",
+    splitMode: "equal",
+    splitWith: ["我"],
+  });
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LEDGER_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (saved.members?.length) setMembers(saved.members);
+      if (saved.entries?.length) setEntries(saved.entries);
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LEDGER_STORAGE_KEY, JSON.stringify({ members, entries }));
+    } catch (e) {
+      console.error(e);
+    }
+  }, [members, entries]);
+
+  useEffect(() => {
+    if (!members.includes(form.member) || !members.includes(form.paidBy)) {
+      const first = members[0] || "我";
+      setForm((prev) => ({ ...prev, member: first, paidBy: first, splitWith: [first] }));
+    }
+  }, [members]);
+
+  const addMember = () => {
+    const name = newMember.trim();
+    if (!name || members.includes(name)) return;
+    setMembers((prev) => [...prev, name]);
+    setNewMember("");
+  };
+
+  const toggleSplitMember = (name: string) => {
+    setForm((prev) => {
+      const exists = prev.splitWith.includes(name);
+      const next = exists ? prev.splitWith.filter((n) => n !== name) : [...prev.splitWith, name];
+      return { ...prev, splitWith: next.length ? next : [name] };
+    });
+  };
+
+  const addEntry = () => {
+    const amount = Number(form.amountTHB || 0);
+    if (!amount) return;
+    const splitWith = form.splitMode === "self" ? [form.member] : (form.splitWith.length ? form.splitWith : [form.member]);
+    const entry = {
+      id: `${Date.now()}`,
+      ...form,
+      amountTHB: amount,
+      splitWith,
+      createdAt: new Date().toISOString(),
+    };
+    setEntries((prev) => [entry, ...prev]);
+    setForm((prev) => ({ ...prev, note: "", amountTHB: 0 }));
+  };
+
+  const removeEntry = (id: string) => setEntries((prev) => prev.filter((e) => e.id !== id));
+
+  const summary = useMemo(() => {
+    const result: Record<string, any> = {};
+    members.forEach((m) => {
+      result[m] = { paid: 0, share: 0 };
+    });
+    entries.forEach((e) => {
+      result[e.paidBy] ??= { paid: 0, share: 0 };
+      result[e.paidBy].paid += Number(e.amountTHB || 0);
+      const list = e.splitWith?.length ? e.splitWith : [e.member || e.paidBy];
+      const per = Number(e.amountTHB || 0) / list.length;
+      list.forEach((m) => {
+        result[m] ??= { paid: 0, share: 0 };
+        result[m].share += per;
+      });
+    });
+    return result;
+  }, [entries, members]);
+
+  const totalTHB = entries.reduce((s, e) => s + Number(e.amountTHB || 0), 0);
+
+  return (
+    <Card className="rounded-2xl overflow-hidden border">
+      <CardHeader className={`bg-gradient-to-r ${palette.header}`}>
+        <CardTitle className="text-lg flex items-center gap-2"><Wallet2 className="h-5 w-5" /> 旅遊記帳器（共用版）</CardTitle>
+        <p className="text-sm text-slate-600">目前是瀏覽器儲存版本：同一台裝置會保留資料；不同人不同手機不會自動同步。</p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-3 lg:grid-cols-[1.3fr_2fr]">
+          <div className={`rounded-xl border p-3 ${palette.accent}`}>
+            <div className="mb-2 flex items-center gap-2 text-sm font-medium"><Users className="h-4 w-4" /> 旅伴名單</div>
+            <div className="flex gap-2">
+              <input value={newMember} onChange={(e) => setNewMember(e.target.value)} placeholder="輸入旅伴名稱" className="w-full rounded-lg border px-2 py-1.5 text-sm" />
+              <Button type="button" size="sm" onClick={addMember}><Plus className="h-4 w-4" /></Button>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {members.map((m) => <Badge key={m} className="rounded-lg border bg-white text-slate-700">{m}</Badge>)}
+            </div>
+            <div className="mt-3 text-xs text-slate-500">可用來算誰先墊、誰該分攤。</div>
+          </div>
+
+          <div className="rounded-xl border p-3">
+            <div className="mb-2 text-sm font-medium">新增記帳</div>
+            <div className="grid gap-2 md:grid-cols-2">
+              <input value={form.date} onChange={(e) => setForm((p) => ({ ...p, date: e.target.value }))} placeholder="日期" className="rounded-lg border px-2 py-1.5 text-sm" />
+              <select value={form.category} onChange={(e) => setForm((p) => ({ ...p, category: e.target.value }))} className="rounded-lg border px-2 py-1.5 text-sm">
+                {['餐飲','交通','門票','購物','住宿','其他'].map((c)=><option key={c}>{c}</option>)}
+              </select>
+              <select value={form.member} onChange={(e) => setForm((p) => ({ ...p, member: e.target.value }))} className="rounded-lg border px-2 py-1.5 text-sm">
+                {members.map((m)=><option key={m}>{m}</option>)}
+              </select>
+              <select value={form.paidBy} onChange={(e) => setForm((p) => ({ ...p, paidBy: e.target.value }))} className="rounded-lg border px-2 py-1.5 text-sm">
+                {members.map((m)=><option key={m}>{m}</option>)}
+              </select>
+              <input type="number" value={form.amountTHB} onChange={(e) => setForm((p) => ({ ...p, amountTHB: Number(e.target.value || 0) }))} placeholder="金額 THB" className="rounded-lg border px-2 py-1.5 text-sm" />
+              <input value={form.note} onChange={(e) => setForm((p) => ({ ...p, note: e.target.value }))} placeholder="備註（例如：晚餐/Grab）" className="rounded-lg border px-2 py-1.5 text-sm" />
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-slate-500">分攤方式：</span>
+              <button className={`rounded-full border px-2 py-1 ${form.splitMode==='equal'?'bg-slate-900 text-white':'bg-white'}`} onClick={() => setForm((p)=>({ ...p, splitMode:'equal' }))}>多人均分</button>
+              <button className={`rounded-full border px-2 py-1 ${form.splitMode==='self'?'bg-slate-900 text-white':'bg-white'}`} onClick={() => setForm((p)=>({ ...p, splitMode:'self' }))}>自己負擔</button>
+            </div>
+            {form.splitMode === 'equal' && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {members.map((m) => {
+                  const active = form.splitWith.includes(m);
+                  return (
+                    <button key={m} onClick={() => toggleSplitMember(m)} className={`rounded-full border px-2 py-1 text-xs ${active ? 'bg-sky-100 border-sky-300 text-sky-800' : 'bg-white'}`}>
+                      {m}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <div className="mt-3 flex items-center justify-between">
+              <div className="text-xs text-slate-500">約 TWD {(Number(form.amountTHB || 0) * rate).toFixed(0)}</div>
+              <Button size="sm" onClick={addEntry}>新增記帳</Button>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid gap-3 lg:grid-cols-[1.2fr_1.8fr]">
+          <div className={`rounded-xl border p-3 ${palette.accent}`}>
+            <div className="text-sm font-medium">分帳總覽</div>
+            <div className="mt-2 space-y-2">
+              {Object.entries(summary).map(([name, data]) => {
+                const balance = data.paid - data.share;
+                return (
+                  <div key={name} className="rounded-lg border bg-white/80 p-2 text-sm">
+                    <div className="font-medium">{name}</div>
+                    <div className="text-xs text-slate-600">已付 ฿{data.paid.toFixed(0)}｜應分攤 ฿{data.share.toFixed(0)}</div>
+                    <div className={`text-xs mt-1 ${balance >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                      {balance >= 0 ? `應收回 ฿${balance.toFixed(0)}` : `應再付 ฿${Math.abs(balance).toFixed(0)}`}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-3 text-xs text-slate-500">總支出：฿{totalTHB.toFixed(0)}（約 TWD {(totalTHB * rate).toFixed(0)}）</div>
+          </div>
+
+          <div className="rounded-xl border p-3">
+            <div className="text-sm font-medium">記帳明細</div>
+            <div className="mt-2 max-h-72 space-y-2 overflow-auto pr-1">
+              {entries.length === 0 && <div className="text-xs text-slate-500">尚未新增記帳資料</div>}
+              {entries.map((e) => (
+                <div key={e.id} className="rounded-lg border p-2 text-sm">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="font-medium">{e.date}｜{e.category}｜฿{Number(e.amountTHB).toFixed(0)}</div>
+                      <div className="text-xs text-slate-600">{e.note || '-'}｜付款：{e.paidBy}｜分攤：{(e.splitWith || []).join('、')}</div>
+                    </div>
+                    <button onClick={() => removeEntry(e.id)} className="rounded-md border p-1 hover:bg-slate-50"><Trash2 className="h-3.5 w-3.5" /></button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function EventCard({ event, palette, rate }: { event: any; palette: any; rate: number }) {
   const [copied, setCopied] = useState(false);
+  const [done, setDone] = useState(false);
+  const [costTHB, setCostTHB] = useState(event.budgetTHB ?? estimateCostTHB(event));
+  const typeStyle = getTypeStyle(event.icon || "clock");
+  const costTWD = Number(costTHB || 0) * rate;
 
   const copyAddress = async () => {
     if (!event.address) return;
@@ -367,6 +596,11 @@ function EventCard({ event, palette }: { event: any; palette: any }) {
   return (
     <div className={`relative rounded-2xl border bg-white/85 p-4 shadow-sm backdrop-blur ${palette.accent}`}>
       <div className="absolute left-[-9px] top-6 h-4 w-4 rounded-full border bg-white" />
+      <div className="absolute right-3 top-3">
+        <button onClick={() => setDone((v) => !v)} className={`text-xs rounded-full border px-2 py-1 ${done ? "bg-emerald-100 border-emerald-300 text-emerald-800" : "bg-white border-slate-200 text-slate-600"}`}>
+          {done ? "已完成" : "未完成"}
+        </button>
+      </div>
       <div className="flex flex-col gap-3 md:flex-row md:items-start">
         <div className="min-w-[84px]">
           <Badge className={`rounded-xl px-3 py-1 text-sm border ${palette.chip}`}>{event.time}</Badge>
@@ -383,6 +617,7 @@ function EventCard({ event, palette }: { event: any; palette: any }) {
           </div>
 
           <div className="flex flex-wrap gap-2 text-xs">
+            <Badge className={`rounded-lg border ${typeStyle.badge}`}>{typeStyle.label}</Badge>
             {event.transport && event.transport !== "-" && (
               <Badge variant="secondary" className="rounded-lg">交通：{event.transport}</Badge>
             )}
@@ -413,6 +648,24 @@ function EventCard({ event, palette }: { event: any; palette: any }) {
           </div>
 
           {event.note && <p className="text-sm leading-relaxed text-slate-700">{event.note}</p>}
+
+          <div className="rounded-xl border border-white/70 bg-white/70 p-3">
+            <div className="mb-2 flex items-center gap-2 text-xs text-slate-600">
+              <Calculator className="h-3.5 w-3.5" /> 預算估算（可修改）
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-500">THB</span>
+                <input type="number" min="0" value={costTHB} onChange={(e) => setCostTHB(Number(e.target.value || 0))} className="w-24 rounded-lg border px-2 py-1 text-sm" />
+              </div>
+              <div className="text-xs text-slate-500">≈</div>
+              <div className="flex items-center gap-1 rounded-lg border bg-slate-50 px-2 py-1 text-sm">
+                <Coins className="h-3.5 w-3.5" />
+                <span>TWD {costTWD.toFixed(0)}</span>
+              </div>
+            </div>
+          </div>
+
           {event.address && <p className="text-xs text-slate-500">地址：{event.address}</p>}
         </div>
       </div>
@@ -422,15 +675,26 @@ function EventCard({ event, palette }: { event: any; palette: any }) {
 
 export default function BangkokTripApp() {
   const [selectedDay, setSelectedDay] = useState(itinerary[0].id);
+  const [rate, setRate] = useState(DEFAULT_TWD_PER_THB);
+  const [thbInput, setThbInput] = useState(1000);
+  const [twdInput, setTwdInput] = useState(1000);
 
   const selected = useMemo(() => itinerary.find((d) => d.id === selectedDay) || itinerary[0], [selectedDay]);
   const totalStops = itinerary.reduce((sum, d) => sum + d.events.length, 0);
   const activePalette = getDayPalette(selected.id);
+  const selectedDayEstimatedTHB = selected.events.reduce((sum, e) => sum + estimateCostTHB(e), 0);
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-50 via-white to-slate-100 p-4 md:p-8">
-      <div className="mx-auto max-w-6xl space-y-6">
+    <div className="relative min-h-screen overflow-hidden bg-gradient-to-b from-slate-50 via-white to-slate-100 p-4 md:p-8">
+      <div className="pointer-events-none absolute inset-0 opacity-30">
+        <div className="absolute -top-10 -left-10 h-40 w-40 rounded-full bg-amber-200 blur-3xl" />
+        <div className="absolute top-20 right-10 h-40 w-40 rounded-full bg-pink-200 blur-3xl" />
+        <div className="absolute bottom-10 left-1/3 h-48 w-48 rounded-full bg-sky-200 blur-3xl" />
+      </div>
+      <div className="pointer-events-none absolute inset-0 opacity-[0.05]" style={{ backgroundImage: "radial-gradient(circle at 1px 1px, #334155 1px, transparent 0)", backgroundSize: "18px 18px" }} />
+      <div className="relative mx-auto max-w-6xl space-y-6">
         <Card className="rounded-3xl border-0 shadow-lg overflow-hidden">
+          <div className="h-1.5 w-full bg-gradient-to-r from-amber-300 via-pink-300 via-sky-300 to-emerald-300" />
           <CardHeader className={`pb-2 bg-gradient-to-r ${activePalette.header}`}>
             <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
               <div>
@@ -455,6 +719,42 @@ export default function BangkokTripApp() {
             </div>
           </CardHeader>
         </Card>
+
+        <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
+          <Card className="rounded-2xl overflow-hidden border">
+            <CardHeader className={`bg-gradient-to-r ${activePalette.header}`}>
+              <CardTitle className="text-lg flex items-center gap-2"><Coins className="h-5 w-5" /> 匯率換算器（THB / TWD）</CardTitle>
+              <p className="text-sm text-slate-600">已預設匯率，可手動改成你當天實際換到的匯率。</p>
+            </CardHeader>
+            <CardContent className="grid gap-3 md:grid-cols-3">
+              <div className="rounded-xl border p-3">
+                <div className="text-xs text-slate-500">1 THB = ? TWD</div>
+                <input type="number" step="0.001" value={rate} onChange={(e) => setRate(Number(e.target.value || 0))} className="mt-2 w-full rounded-lg border px-2 py-1.5" />
+              </div>
+              <div className="rounded-xl border p-3">
+                <div className="text-xs text-slate-500">THB → TWD</div>
+                <input type="number" value={thbInput} onChange={(e) => setThbInput(Number(e.target.value || 0))} className="mt-2 w-full rounded-lg border px-2 py-1.5" />
+                <div className="mt-2 text-sm font-medium">≈ TWD {(thbInput * rate).toFixed(0)}</div>
+              </div>
+              <div className="rounded-xl border p-3">
+                <div className="text-xs text-slate-500">TWD → THB</div>
+                <input type="number" value={twdInput} onChange={(e) => setTwdInput(Number(e.target.value || 0))} className="mt-2 w-full rounded-lg border px-2 py-1.5" />
+                <div className="mt-2 text-sm font-medium">≈ THB {rate ? (twdInput / rate).toFixed(0) : 0}</div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className={`rounded-2xl border ${activePalette.accent}`}>
+            <CardContent className="p-4">
+              <div className="text-xs text-slate-500">當日預估花費</div>
+              <div className="mt-1 text-xl font-bold">฿{selectedDayEstimatedTHB.toLocaleString()}</div>
+              <div className="text-sm text-slate-600">約 TWD {(selectedDayEstimatedTHB * rate).toFixed(0)}</div>
+              <div className="mt-3 text-xs text-slate-500">* 可在每個行程卡中調整預算數字</div>
+            </CardContent>
+          </Card>
+        </div>
+
+        <TravelLedger rate={rate} palette={activePalette} />
 
         <Tabs value={selectedDay} onValueChange={setSelectedDay}>
           <TabsList className="grid h-auto w-full grid-cols-2 gap-2 rounded-2xl bg-transparent p-0 md:grid-cols-5">
@@ -522,7 +822,7 @@ export default function BangkokTripApp() {
                   <CardContent>
                     <div className={`relative space-y-3 pl-6 before:absolute before:left-1.5 before:top-2 before:h-[calc(100%-12px)] before:w-0.5 ${getDayPalette(day.id).line}`}>
                       {day.events.map((event, index) => (
-                        <EventCard key={`${day.id}-${index}`} event={event} palette={getDayPalette(day.id)} />
+                        <EventCard key={`${day.id}-${index}`} event={event} palette={getDayPalette(day.id)} rate={rate} />
                       ))}
                     </div>
                   </CardContent>
@@ -535,8 +835,8 @@ export default function BangkokTripApp() {
         <Card className={`rounded-2xl border-dashed border-2 ${activePalette.accent}`}>
           <CardContent className="flex flex-col gap-3 p-4 text-sm text-slate-700 md:flex-row md:items-center md:justify-between">
             <div>
-              <div className="font-medium">可再加的功能（下一版）</div>
-              <div className="text-slate-600">匯率換算、預算記帳、勾選完成、交通費估算、離線模式、共用連結</div>
+              <div className="font-medium">已升級功能</div>
+              <div className="text-slate-600">匯率換算、旅遊記帳器（本機儲存）、預算估算、完成勾選、行程類型色塊、泰系漸層背景</div>
             </div>
             <div className="flex gap-2">
               <Button variant="secondary" onClick={() => setSelectedDay("day1")}>回 Day 1</Button>
